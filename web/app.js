@@ -4,7 +4,7 @@
   // actually pick up the new build?" question can be answered by looking,
   // not assumed — browser/CDN caching can otherwise make a hard refresh
   // silently keep serving a stale bundle.
-  const APP_VERSION = '2026-08-10.16-write-lab';
+  const APP_VERSION = '2026-08-10.17-write-lab-rpc-mode';
 
   // Bump whenever the exported-report JSON schema changes (new/renamed fields the loader
   // depends on). Lets loadReportFile() below tell an old export apart from the current shape
@@ -1251,7 +1251,9 @@
   ];
   const writeLabActiveComponents = new Set(WRITE_LAB_COMPONENTS.map(([c]) => c)); // default: all on
   let writeLabState = null; // null | 'pending' | 'done' | 'failed'
-  let writeLabLastResult = null; // {forComponent, forName, beforeDisplay, payloadHex, ok, statusName, afterDisplay} | null
+  let writeLabMode = 'write'; // 'write' | 'rpc' — RPC simulates a button press (ArgumentLessCallableDataPoint), not a state write
+  let writeLabIncludeArg = false; // rpc mode only — most CallableDataPoints Flow declares take no argument at all
+  let writeLabLastResult = null; // {forComponent, forName, mode, beforeDisplay, payloadHex, ok, statusName, resultPayloadHex, afterDisplay} | null
 
   function writeLabAddresses() {
     return window.Bes3AddressRegistry.ADDRESS_REGISTRY.addresses
@@ -1380,6 +1382,7 @@
     writeLabLastResult = {
       forComponent: entry.component,
       forName: entry.name,
+      mode: 'write',
       beforeDisplay,
       payloadHex: toHex(payload),
       ok,
@@ -1390,6 +1393,56 @@
       const idx = lastResults.findIndex((x) => x.component === entry.component && x.name === entry.name);
       if (idx >= 0) { lastResults[idx].status = 'ok'; lastResults[idx].typed = readBack; lastResults[idx].decoded = readBack; }
     }
+    renderDashboard();
+  }
+
+  // Simulates a button press: sends addr as an RPC (MessageType.RPC), not a WRITE. Confirmed via
+  // decompile that some addresses (e.g. RemoteControl.TOGGLE_BIKE_LIGHT) are declared
+  // ArgumentLessCallableDataPoint<Boolean> in Flow's own schema — a plain command, not a
+  // readable/writable state, which is exactly why they decline a normal read/write and need this
+  // separate path. Argument defaults to none (matching the common case); writeLabIncludeArg lets
+  // the same kind-matched input from Write mode double as the RPC argument for the few
+  // CallableDataPoints that do take one (e.g. ASSIST_MODE_UP/DOWN's bool arg).
+  async function attemptRpcLab(entry, argPayload) {
+    if (!transport) {
+      await appAlert('Not connected to the bike anymore — reconnect (Read again) and try again.');
+      return;
+    }
+    writeLabState = 'pending';
+    renderWriteLab();
+    const beforeDisplay = displayOf(entry.component, entry.name, '(never read)');
+    const result = await rpcCallWithArg(
+      entry.address, argPayload, (p) => p, `write-lab-rpc-${entry.component}.${entry.name}`
+    );
+    let ok;
+    let statusName;
+    let resultPayloadHex = null;
+    if (result === null) { ok = false; statusName = 'timeout'; }
+    else if (result && result.declined) { ok = false; statusName = result.statusName; }
+    else { ok = true; statusName = 'SUCCESS'; resultPayloadHex = toHex(result); }
+    writeLabState = ok ? 'done' : 'failed';
+    // The call's own return value (if any) is separate from the data point's stored value — a
+    // command can succeed and return nothing meaningful while still changing bike state, so
+    // always re-read the address afterward too, same reasoning as the write path.
+    let afterDisplay = null;
+    try {
+      const r = await readOne(entry.address);
+      if (r && !r.declined) {
+        const typed = decodeTyped(entry.address, r.payload);
+        afterDisplay = typed ? typed.display : decodeValue(r.payload).display;
+      }
+    } catch { /* leave afterDisplay as null — shown as "(unchanged / declined)" */ }
+    writeLabLastResult = {
+      forComponent: entry.component,
+      forName: entry.name,
+      mode: 'rpc',
+      beforeDisplay,
+      payloadHex: toHex(argPayload),
+      ok,
+      statusName,
+      resultPayloadHex,
+      afterDisplay,
+    };
     renderDashboard();
   }
 
@@ -1420,43 +1473,85 @@
     kindRow.lastElementChild.textContent = entry.kind + (entry.writable ? '' : ' — registry says not writable');
     els.writeLabDetail.appendChild(kindRow);
 
-    const { el: inputEl, getPayload } = buildWriteLabInput(entry);
-    els.writeLabDetail.appendChild(inputEl);
+    // Mode toggle: WRITE (a state, MessageType.WRITE) vs CALL (a command/button-press,
+    // MessageType.RPC — needed for the addresses Flow declares ArgumentLessCallableDataPoint,
+    // which decline a plain read/write since they were never a stored value to begin with).
+    const modeRow = document.createElement('div');
+    modeRow.className = 'write-lab-component-filter';
+    for (const [mode, label] of [['write', 'Write'], ['rpc', 'Call (RPC / button press)']]) {
+      const chip = document.createElement('button');
+      chip.type = 'button';
+      chip.className = 'write-lab-chip' + (writeLabMode === mode ? ' active' : '');
+      chip.textContent = label;
+      chip.addEventListener('click', () => { writeLabMode = mode; renderWriteLab(); });
+      modeRow.appendChild(chip);
+    }
+    els.writeLabDetail.appendChild(modeRow);
+
+    let getPayload = () => [];
+    if (writeLabMode === 'write') {
+      const { el: inputEl, getPayload: gp } = buildWriteLabInput(entry);
+      els.writeLabDetail.appendChild(inputEl);
+      getPayload = gp;
+    } else {
+      const argLabel = document.createElement('label');
+      const argCheck = document.createElement('input');
+      argCheck.type = 'checkbox';
+      argCheck.checked = writeLabIncludeArg;
+      argLabel.append(argCheck, document.createTextNode(' include an argument (most commands take none)'));
+      els.writeLabDetail.appendChild(argLabel);
+      let gp = () => [];
+      if (writeLabIncludeArg) {
+        const { el: inputEl, getPayload: gp2 } = buildWriteLabInput(entry);
+        els.writeLabDetail.appendChild(inputEl);
+        gp = gp2;
+      }
+      getPayload = gp;
+      argCheck.addEventListener('change', () => { writeLabIncludeArg = argCheck.checked; renderWriteLab(); });
+    }
 
     const btn = document.createElement('button');
     btn.type = 'button';
     btn.className = 'histogram-reset-btn';
     if (writeLabState === 'pending') { btn.textContent = 'Sending…'; btn.disabled = true; }
     else if (!sweepFullyLoaded) { btn.textContent = 'Loading…'; btn.disabled = true; }
-    else { btn.textContent = 'Write'; }
+    else { btn.textContent = writeLabMode === 'write' ? 'Write' : 'Call'; }
     btn.addEventListener('click', async () => {
       const payload = getPayload();
       if (payload === null) {
         await appAlert('Could not parse that value into bytes — check the input.');
         return;
       }
+      const verb = writeLabMode === 'write' ? 'Write to' : 'Call (RPC)';
+      const risk = writeLabMode === 'write'
+        ? 'This is a highly experimental, generic raw write — it goes straight to the protocol ' +
+          'level with no per-field validation beyond basic type encoding.'
+        : 'This is a highly experimental, generic RPC call — it simulates whatever button/command ' +
+          'this address represents, straight at the protocol level.';
       const confirmed = await appConfirm(
-        `Write to ${entry.component}.${entry.name} (addr ${addr}, 0x${addr.toString(16)})?\n\n` +
+        `${verb} ${entry.component}.${entry.name} (addr ${addr}, 0x${addr.toString(16)})?\n\n` +
         `Bytes to send: ${toHex(payload) || '(empty)'}\n\n` +
-        'This is a highly experimental, generic raw write — it goes straight to the protocol ' +
-        'level with no per-field validation beyond basic type encoding. It may be silently ' +
-        'ignored, explicitly denied, or in rare cases could leave the bike in an unexpected ' +
-        'state. Only proceed if you understand what this field does and accept that risk.'
+        `${risk} It may be silently ignored, explicitly denied, or in rare cases could leave the ` +
+        'bike in an unexpected state. Only proceed if you understand what this field does and ' +
+        'accept that risk.'
       );
-      if (confirmed) attemptWriteLab(entry, payload);
+      if (!confirmed) return;
+      if (writeLabMode === 'write') attemptWriteLab(entry, payload);
+      else attemptRpcLab(entry, payload);
     });
     els.writeLabDetail.appendChild(btn);
 
     const r = writeLabLastResult;
-    if (r && r.forComponent === entry.component && r.forName === entry.name) {
+    if (r && r.forComponent === entry.component && r.forName === entry.name && r.mode === writeLabMode) {
       const result = document.createElement('div');
       result.className = 'write-lab-result';
       const rows = [
         ['Before', r.beforeDisplay],
         ['Sent (hex)', r.payloadHex || '(empty)'],
         ['Response', r.statusName || (r.ok ? 'SUCCESS' : 'no response')],
-        ['After (re-read)', r.afterDisplay ?? '(unchanged / declined)'],
       ];
+      if (r.mode === 'rpc') rows.push(['Call returned', r.resultPayloadHex || '(no payload)']);
+      rows.push(['After (re-read)', r.afterDisplay ?? '(unchanged / declined)']);
       for (const [k, v] of rows) {
         const row = document.createElement('div');
         row.className = 'write-lab-row';
