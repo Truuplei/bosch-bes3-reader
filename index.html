@@ -161,14 +161,19 @@
   .card-action-row { margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--border); }
   .card-action-row .histogram-settings-summary { font-size: 11.5px; }
   .histogram-settings-summary { font: 400 10.5px 'IBM Plex Mono', monospace; color: var(--faint); }
-  .write-experiments-title { display: block; font: 600 9.5px 'IBM Plex Mono', monospace; color: var(--danger); letter-spacing: 0.03em; margin-bottom: 8px; cursor: help; }
-  .write-experiment-row { display: grid; grid-template-columns: 1fr auto auto; align-items: center; gap: 8px 12px; padding: 4px 0; font: 400 11px 'IBM Plex Mono', monospace; }
-  .write-experiment-label { color: var(--faint); }
-  .write-experiment-value { color: var(--text); text-align: right; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 140px; }
-  .write-experiment-value.good { color: var(--good); }
-  .write-experiment-real .write-experiment-label { color: var(--text); font-weight: 600; }
-  .write-experiment-tryall-row { display: flex; flex-direction: column; align-items: flex-end; gap: 6px; padding: 4px 0 4px; }
-  .write-experiment-tryall-results { display: flex; flex-direction: column; align-items: flex-end; gap: 2px; font: 400 10.5px 'IBM Plex Mono', monospace; color: var(--faint); }
+  .write-lab-card { border-color: var(--danger); }
+  .write-lab-warning { font: 400 11px 'IBM Plex Mono', monospace; color: var(--danger); line-height: 1.5; margin: 0; }
+  .write-lab-component-filter { display: flex; flex-wrap: wrap; gap: 5px; }
+  .write-lab-chip { font: 500 10px 'IBM Plex Sans', sans-serif; color: var(--faint); background: none; border: 1px solid var(--border2); border-radius: 12px; padding: 2px 9px; cursor: pointer; white-space: nowrap; }
+  .write-lab-chip.active { color: var(--accent); border-color: var(--accent); }
+  .write-lab-search-row input[type="text"] { width: 100%; box-sizing: border-box; font: 400 12px 'IBM Plex Mono', monospace; background: var(--bg); color: var(--text); border: 1px solid var(--border2); border-radius: 5px; padding: 6px 8px; }
+  .write-lab-row { display: grid; grid-template-columns: 1fr auto; align-items: center; gap: 8px 12px; padding: 3px 0; font: 400 11px 'IBM Plex Mono', monospace; }
+  .write-lab-row > span:first-child { color: var(--faint); }
+  .write-lab-row > span:last-child { color: var(--text); text-align: right; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 220px; }
+  .write-lab-input { padding: 4px 0; }
+  .write-lab-input input[type="text"], .write-lab-input input[type="number"], .write-lab-input select { width: 100%; box-sizing: border-box; font: 400 12px 'IBM Plex Mono', monospace; background: var(--bg); color: var(--text); border: 1px solid var(--border2); border-radius: 5px; padding: 5px 7px; }
+  .write-lab-hex-input { font-family: 'IBM Plex Mono', monospace; }
+  .write-lab-result { margin-top: 8px; padding-top: 8px; border-top: 1px solid var(--border); }
   .histogram-reset-btn { font: 500 10.5px 'IBM Plex Sans', sans-serif; color: var(--accent); background: none; border: 1px solid var(--border2); border-radius: 5px; padding: 2px 8px; cursor: pointer; white-space: nowrap; }
   .histogram-reset-btn:disabled { color: var(--faint); cursor: default; opacity: 0.7; }
   .histogram-label-clickable { cursor: pointer; text-decoration: underline dotted; text-underline-offset: 2px; }
@@ -391,10 +396,21 @@
         <div class="card data-card">
           <span class="card-label">DRIVETRAIN</span>
           <div class="kv-grid" id="drivetrainGrid"></div>
-          <div class="write-experiments-block card-action-row">
-            <span class="write-experiments-title" title="Start mode (6180) is a genuinely writable setting, gated on its own OEM precondition. The other two rows are deliberate protocol-level probes — those fields are read-only in Bosch's own client (no writer exists for them anywhere in the official code) — sent purely to see how the bike's firmware itself responds; never assumed to work.">WRITE EXPERIMENTS</span>
-            <div id="writeExperiments"></div>
+        </div>
+        <div class="card data-card write-lab-card">
+          <span class="card-label">WRITE LAB (EXPERIMENTAL)</span>
+          <p class="write-lab-warning">
+            &#9888; Sends a raw WRITE to any known address on any component. Highly experimental:
+            writes may be silently ignored, explicitly denied, or in rare cases could leave the
+            bike in an unexpected state. Only use this if you understand what you're doing.
+          </p>
+          <div class="write-lab-component-filter" id="writeLabComponentFilter"></div>
+          <div class="write-lab-search-row">
+            <input type="text" id="writeLabSearch" list="writeLabAddressList" autocomplete="off"
+                   placeholder="Search a field by name…" />
+            <datalist id="writeLabAddressList"></datalist>
           </div>
+          <div id="writeLabDetail"></div>
         </div>
         <div class="card data-card">
           <span class="card-label">USAGE</span>

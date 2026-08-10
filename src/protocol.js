@@ -164,20 +164,19 @@ function encodeEnumArg(value) {
 
 // Encodes a plain protobuf bool value (field 1, varint) — proto3 omits the field
 // entirely when false, so encoding false is deliberately an empty payload, not
-// a zero-valued byte. Used only by the DISTRACTED_RIDING_ALERT protocol probe
-// (addr 6161) — this field is read-only in Bosch's own code (no writer exists
-// anywhere in the adapter interface); this is a deliberate protocol-level probe
-// of what firmware itself does with a write Bosch's own client never sends, not
-// a supported feature. See the private research notes for the full rationale.
+// a zero-valued byte.
 function encodeBoolArg(value) {
   return value ? [0x08, 0x01] : [];
 }
 
+// Encodes a plain protobuf string value (field 1, length-delimited).
+function encodeStringArg(value) {
+  const bytes = Array.from(new TextEncoder().encode(String(value ?? '')));
+  return [0x0a, ...encodeVarint(bytes.length), ...bytes];
+}
+
 // Encodes the 2-field StartAssistModeConfigurationOem shape (field 1 = position
-// enum, field 2 = configurable bool, proto3-omitted when false) — used only by
-// the START_ASSIST_MODE_CONFIGURATION_OEM protocol probe (addr 6179). Also
-// read-only in Bosch's own code (bikeState(), not bikeStateReadableWritableSubscribable())
-// — same deliberate-probe caveat as encodeBoolArg above.
+// enum, field 2 = configurable bool, proto3-omitted when false).
 function encodeStartAssistModeOemArg(position, configurable) {
   return [0x08, ...encodeVarint(position), ...(configurable ? [0x10, 0x01] : [])];
 }
@@ -634,6 +633,7 @@ const protocolExports = {
   buildWriteFrame,
   encodeEnumArg,
   encodeBoolArg,
+  encodeStringArg,
   encodeStartAssistModeOemArg,
   buildRpcCallFrame,
   buildRpcCallFrameWithArg,

@@ -4,7 +4,7 @@
   // actually pick up the new build?" question can be answered by looking,
   // not assumed — browser/CDN caching can otherwise make a hard refresh
   // silently keep serving a stale bundle.
-  const APP_VERSION = '2026-08-05.15-assist-mode-usb-experiments';
+  const APP_VERSION = '2026-08-10.16-write-lab';
 
   // Bump whenever the exported-report JSON schema changes (new/renamed fields the loader
   // depends on). Lets loadReportFile() below tell an old export apart from the current shape
@@ -23,12 +23,12 @@
 
   const {
     MessageType, buildReadRequestFrame, buildWriteFrame, encodeEnumArg,
-    encodeBoolArg, encodeStartAssistModeOemArg,
+    encodeBoolArg, encodeStringArg, encodeStartAssistModeOemArg,
     buildRpcCallFrame, buildRpcCallFrameWithArg,
     buildSubscribeRequestFrame, buildUnsubscribeRequestFrame, parseNotifyMessage,
     encodeConfigIdArg, decodeAssistModeStatistics, decodeConfigIdList, decodeStringList,
     decodeUdamParams, decodeBoolResponse, decodeUdamLimits, encodeSetUdamValuesParametersArg,
-    parseReadResponseFrame, decodeValue,
+    parseReadResponseFrame, decodeValue, toHex,
   } = window.Bes3Protocol;
   const { decodeTyped, FIELD_TYPES, reformatDisplayFromRaw } = window.Bes3MessageTypes;
   const { Bes3WebUsbTransport, requestDevice } = window.Bes3WebUsb;
@@ -104,7 +104,10 @@
     remoteControlModel: $('remoteControlModel'),
     remoteControlPhoto: $('remoteControlPhoto'),
     assistModeHistogram: $('assistModeHistogram'),
-    writeExperiments: $('writeExperiments'),
+    writeLabComponentFilter: $('writeLabComponentFilter'),
+    writeLabSearch: $('writeLabSearch'),
+    writeLabAddressList: $('writeLabAddressList'),
+    writeLabDetail: $('writeLabDetail'),
     assistModeModalBackdrop: $('assistModeModalBackdrop'),
     assistModeModalTitle: $('assistModeModalTitle'),
     assistModeModalBody: $('assistModeModalBody'),
@@ -586,8 +589,8 @@
   // Generic RPC-with-argument caller. Validates both the response's address
   // AND its type/sequence before accepting it — address-only matching was
   // confirmed unsafe on real hardware (a same-address, wrong-type/wrong-seq
-  // frame was observed arriving during a write's response window; see the
-  // attemptWriteExperiment fix). Matters even more here since this is
+  // frame was observed arriving during a write's response window; see
+  // writeAndReadBack's own seq-matching for the same fix). Matters even more here since this is
   // also used for the UDAM write below — accepting a stray frame as "success"
   // for a write is worse than for a read.
   async function rpcCallWithArg(addr, argPayload, decodeFn, logLabel) {
@@ -1163,113 +1166,12 @@
     });
   }
 
-  const START_ASSIST_MODE_LAST_USED = 1;
-
-  // Unified panel: one row per field, each showing its own live current value plus a single
-  // action button that writes, logs, re-reads, and updates the shown value in place — replaces
-  // the earlier split between a start-mode-specific action and a separate "protocol probes"
-  // block, which looked like 3 identical buttons with no clear indication of which one did what.
-  //
-  // START_ASSIST_MODE_CONFIGURATION (6180) is the one genuinely declared-writable field here
-  // (ReadableWritableSubscribableDataPoint, confirmed via decompile, no dealer/HSM gate) — gated
-  // on its own OEM precondition (6179's `configurable` field), same gate Bosch's own UI uses,
-  // with a labeled override to bypass that gate on purpose for testing.
-  //
-  // The other two rows are deliberate protocol-level PROBES, not supported writes: both addresses
-  // are read-only in Bosch's own client (no writer exists anywhere in the decompiled adapter code)
-  // — sent anyway purely to see how firmware itself responds. Already confirmed once on real
-  // hardware: firmware returns an explicit WRITE_RESPONSE/DENIED for both, not a silent accept —
-  // see the private research notes.
-  const WRITE_EXPERIMENTS = [
-    {
-      id: 'startMode',
-      addrName: 'START_ASSIST_MODE_CONFIGURATION',
-      label: 'Start mode (6180)',
-      isRealWrite: true,
-      // Short form only — the full decoded display ("Position 0 (off/walk)
-      // [START_ASSIST_MODE_POSITION0=2]") is too long for this row's fixed layout, pushing the
-      // action button off the edge of the card.
-      formatValue: (typed) => {
-        const entry = Object.values(FIELD_TYPES[6180].enumTable).find((v) => v.name === (typed && typed.value));
-        return entry ? entry.label : (typed ? typed.value : '—');
-      },
-      buildPayload: () => encodeEnumArg(START_ASSIST_MODE_LAST_USED),
-      gate: () => {
-        const oem = valueOf('DriveUnit', 'START_ASSIST_MODE_CONFIGURATION_OEM');
-        return oem && typeof oem === 'object' ? oem.configurable : null;
-      },
-      confirmText: (gated) => gated === false
-        ? 'Attempt the write anyway, despite the "locked by manufacturer" flag?\n\n' +
-          'This bike reports START_ASSIST_MODE_CONFIGURATION_OEM.configurable = false — the same ' +
-          'flag Bosch\'s own DiagnosticTool 3 checks before offering this control at all. This ' +
-          'bypasses that gate on purpose so the write can actually be attempted, logged, and ' +
-          're-read.\n\nExpected outcome: an explicit DENIED (as already seen for the other two ' +
-          'rows here), or an accepted ack that doesn\'t durably stick. Either way the result and ' +
-          'a re-read are both logged, not assumed.'
-        : 'Set the bike to always start in your last-used assist mode?\n\n' +
-          'This writes ONE setting (START_ASSIST_MODE_CONFIGURATION) so the bike resumes whichever ' +
-          'assist mode you were last using, instead of always powering on in off/walk mode. It ' +
-          'does not touch region, speed-class, tuning, or any per-mode assist parameters.',
-    },
-    {
-      id: 'startModeOemConfigurable',
-      addrName: 'START_ASSIST_MODE_CONFIGURATION_OEM',
-      label: 'Start mode OEM configurable (6179)',
-      isRealWrite: false,
-      // Just the bool this experiment cares about — the position half of this field duplicates
-      // the "Start mode" row above and isn't relevant to what this probe is testing.
-      formatValue: (typed) => (typed && typeof typed.value === 'object' ? String(typed.value.configurable) : '—'),
-      buildPayload: () => {
-        const oem = valueOf('DriveUnit', 'START_ASSIST_MODE_CONFIGURATION_OEM');
-        const positionName = oem && typeof oem === 'object' ? oem.position : 'START_ASSIST_MODE_NOT_CONFIGURED';
-        const enumTable = FIELD_TYPES[6180].enumTable; // same enum table as START_ASSIST_MODE_CONFIGURATION
-        const entry = Object.entries(enumTable).find(([, v]) => v.name === positionName);
-        const positionValue = entry ? Number(entry[0]) : 0;
-        return encodeStartAssistModeOemArg(positionValue, true);
-      },
-      confirmText: () =>
-        'Attempt to write START_ASSIST_MODE_CONFIGURATION_OEM (addr 6179) with configurable=true, ' +
-        'at the protocol level?\n\nThis field is read-only in Bosch\'s own client (no writer exists ' +
-        'in the decompiled adapter code) — this sends a raw WRITE frame anyway. Already tested once ' +
-        'on real hardware: firmware returned an explicit DENIED. The result (including a re-read ' +
-        'afterward) is only logged, not assumed.',
-    },
-    {
-      id: 'distractedRidingAlert',
-      addrName: 'DISTRACTED_RIDING_ALERT',
-      label: 'Distracted riding alert (6161)',
-      isRealWrite: false,
-      formatValue: (typed) => (typed ? String(typed.value) : '—'),
-      buildPayload: () => encodeBoolArg(false),
-      confirmText: () =>
-        'Attempt to write DISTRACTED_RIDING_ALERT (addr 6161) to false, at the protocol level?\n\n' +
-        'This field is read-only in Bosch\'s own client (no writer exists in the decompiled adapter ' +
-        'code) — this sends a raw WRITE frame anyway. Already tested once on real hardware: ' +
-        'firmware returned an explicit DENIED. The result (including a re-read afterward) is only ' +
-        'logged, not assumed.',
-    },
-    {
-      id: 'assistMode',
-      addrName: 'ASSIST_MODE',
-      label: 'Assist mode (6153)',
-      isRealWrite: true,
-      buildPayload: () => encodeEnumArg(1),
-      confirmText: () =>
-        'Attempt to write ASSIST_MODE (addr 6153) to index 1, over USB?\n\n' +
-        'Already tested over BLE from a non-Flow client (a companion React Native PoC): the bike ' +
-        'returned an explicit DENIED, not a timeout. This tests whether USB — a different ' +
-        'transport with a different firmware host address — gets the same result. The result ' +
-        '(including a re-read afterward) is only logged, not assumed. If it actually changes the ' +
-        'bike\'s live assist mode, watch the display/remote.',
-    },
-  ];
-  const experimentState = {}; // id -> null | 'pending' | 'done' | 'failed' ("done" = got a response, not "it worked")
-
-  // Shared by attemptWriteExperiment and attemptTryAllStartModeValues — sends one WRITE, waits
-  // for a genuine sequence-matched WRITE_RESPONSE, then re-reads the address regardless of
-  // outcome. An ack (even SUCCESS) does not by itself tell us what the bike now reports — real
-  // hardware precedent: START_ASSIST_MODE_CONFIGURATION got a genuine, sequence-matched ack yet
-  // a later fresh read still showed the old value — so every caller re-reads rather than assumes.
+  // Shared by every write path below (the Write Lab, and previously the per-address probes it
+  // replaced) — sends one WRITE, waits for a genuine sequence-matched WRITE_RESPONSE, then
+  // re-reads the address regardless of outcome. An ack (even SUCCESS) does not by itself tell us
+  // what the bike now reports — real hardware precedent: START_ASSIST_MODE_CONFIGURATION got a
+  // genuine, sequence-matched ack yet a later fresh read still showed the old value — so every
+  // caller re-reads rather than assumes.
   async function writeAndReadBack(addr, payload, tag) {
     const dlog = window.Bes3DebugLog;
     if (dlog) dlog.log(tag, 'payload before write', payload);
@@ -1328,223 +1230,249 @@
     return { ok, statusName, readBack };
   }
 
-  async function attemptWriteExperiment(id) {
-    const exp = WRITE_EXPERIMENTS.find((e) => e.id === id);
-    const addr = addrOf('DriveUnit', exp.addrName);
-    if (!addr || !transport) {
+  // ---------- Write Lab: generic, opt-in raw write against ANY known address ----------
+  // Replaces the earlier per-address WRITE_EXPERIMENTS/RPC_EXPERIMENTS arrays (one hardcoded
+  // probe per field) with a single searchable tool that works for any component/address in the
+  // registry — trading bespoke per-field encoders for one generic path: friendly inputs for the
+  // simple kinds (bool/enum/uint/string), raw hex bytes for everything else. Every write still
+  // goes through writeAndReadBack() above, so the result is always a genuine sequence-matched
+  // WRITE_RESPONSE (never assumed) and the address is always re-read afterward.
+  const WRITE_LAB_COMPONENTS = [
+    ['DriveUnit', 'Drive Unit'],
+    ['Battery', 'Battery'],
+    ['Battery2', 'Battery 2'],
+    ['RemoteControl', 'Remote'],
+    ['HeadUnit', 'Head Unit'],
+    ['ConnectModule', 'Connect Module'],
+    ['AntiLockBrakeSystem', 'ABS'],
+    ['MobileApp', 'Mobile App'],
+    ['BoschDiagnoseApp', 'Diagnose App'],
+    ['CanTestNode', 'CAN Test Node'],
+  ];
+  const writeLabActiveComponents = new Set(WRITE_LAB_COMPONENTS.map(([c]) => c)); // default: all on
+  let writeLabState = null; // null | 'pending' | 'done' | 'failed'
+  let writeLabLastResult = null; // {forComponent, forName, beforeDisplay, payloadHex, ok, statusName, afterDisplay} | null
+
+  function writeLabAddresses() {
+    return window.Bes3AddressRegistry.ADDRESS_REGISTRY.addresses
+      .filter((a) => writeLabActiveComponents.has(a.component))
+      .slice()
+      .sort((a, b) => a.label.localeCompare(b.label));
+  }
+
+  function writeLabOptionText(a) {
+    return `${a.label} — ${a.component}.${a.name} (0x${a.address.toString(16)})`;
+  }
+
+  function findWriteLabEntry(searchValue) {
+    return window.Bes3AddressRegistry.ADDRESS_REGISTRY.addresses.find(
+      (a) => writeLabOptionText(a) === searchValue
+    ) || null;
+  }
+
+  function renderWriteLabComponentFilter() {
+    els.writeLabComponentFilter.innerHTML = '';
+    for (const [component, label] of WRITE_LAB_COMPONENTS) {
+      const chip = document.createElement('button');
+      chip.type = 'button';
+      chip.className = 'write-lab-chip' + (writeLabActiveComponents.has(component) ? ' active' : '');
+      chip.textContent = label;
+      chip.addEventListener('click', () => {
+        if (writeLabActiveComponents.has(component)) writeLabActiveComponents.delete(component);
+        else writeLabActiveComponents.add(component);
+        renderWriteLab();
+      });
+      els.writeLabComponentFilter.appendChild(chip);
+    }
+  }
+
+  // Bool/enum/uint share the same wire shape (protobuf field 1) — only the friendly input
+  // differs. String gets its own length-delimited encoder. Everything else (submessage/unknown/
+  // and the long tail of bespoke kinds like normFactor/uuid/tuningDetection) falls back to raw
+  // hex bytes: least friendly, but the one encoding that's never wrong, since what you type is
+  // exactly what gets sent.
+  function buildWriteLabInput(entry) {
+    const wrap = document.createElement('div');
+    wrap.className = 'write-lab-input';
+    if (entry.kind === 'bool') {
+      const label = document.createElement('label');
+      const check = document.createElement('input');
+      check.type = 'checkbox';
+      label.append(check, document.createTextNode(' true'));
+      wrap.appendChild(label);
+      return { el: wrap, getPayload: () => encodeBoolArg(check.checked) };
+    }
+    if (entry.kind === 'enum' && entry.enumTable) {
+      const select = document.createElement('select');
+      for (const [ordinal, e] of Object.entries(entry.enumTable)) {
+        const opt = document.createElement('option');
+        opt.value = ordinal;
+        opt.textContent = `${e.label} (${e.name}=${ordinal})`;
+        select.appendChild(opt);
+      }
+      wrap.appendChild(select);
+      return { el: wrap, getPayload: () => encodeEnumArg(Number(select.value)) };
+    }
+    if (entry.kind === 'uint') {
+      const input = document.createElement('input');
+      input.type = 'number';
+      input.min = '0';
+      input.step = '1';
+      input.placeholder = 'integer value';
+      wrap.appendChild(input);
+      return {
+        el: wrap,
+        getPayload: () => {
+          const n = Number(input.value);
+          return Number.isInteger(n) && n >= 0 ? encodeEnumArg(n) : null;
+        },
+      };
+    }
+    if (entry.kind === 'string') {
+      const input = document.createElement('input');
+      input.type = 'text';
+      input.placeholder = 'text value';
+      wrap.appendChild(input);
+      return { el: wrap, getPayload: () => encodeStringArg(input.value) };
+    }
+    const input = document.createElement('input');
+    input.type = 'text';
+    input.className = 'write-lab-hex-input';
+    input.placeholder = 'raw hex bytes, e.g. 08 01';
+    wrap.appendChild(input);
+    return {
+      el: wrap,
+      getPayload: () => {
+        const cleaned = input.value.trim().replace(/0x/gi, '').replace(/[\s,]+/g, '');
+        if (cleaned === '') return [];
+        if (!/^[0-9a-fA-F]+$/.test(cleaned) || cleaned.length % 2 !== 0) return null;
+        const bytes = [];
+        for (let i = 0; i < cleaned.length; i += 2) bytes.push(parseInt(cleaned.slice(i, i + 2), 16));
+        return bytes;
+      },
+    };
+  }
+
+  async function attemptWriteLab(entry, payload) {
+    if (!transport) {
       await appAlert('Not connected to the bike anymore — reconnect (Read again) and try again.');
       return;
     }
-    experimentState[id] = 'pending';
-    renderWriteExperiments();
-    const payload = exp.buildPayload();
-    const { ok, readBack } = await writeAndReadBack(addr, payload, `write-${id}`);
-    experimentState[id] = ok ? 'done' : 'failed';
+    writeLabState = 'pending';
+    renderWriteLab();
+    const beforeDisplay = displayOf(entry.component, entry.name, '(never read)');
+    const { ok, statusName, readBack } = await writeAndReadBack(
+      entry.address, payload, `write-lab-${entry.component}.${entry.name}`
+    );
+    writeLabState = ok ? 'done' : 'failed';
+    // writeAndReadBack only decodes via decodeTyped(), which returns null for the ~520
+    // "unknown"-kind addresses (no confirmed FIELD_TYPES entry) — the majority of what this
+    // generic tool searches over. Re-read the raw payload ourselves and fall back to decodeValue
+    // (the same generic hex/string/uint guesser the rest of the dashboard uses) so "after" still
+    // shows something real for those addresses instead of always reading as unchanged.
+    let afterDisplay = readBack ? readBack.display : null;
+    if (!readBack && transport) {
+      try {
+        const r = await readOne(entry.address);
+        if (r && !r.declined) afterDisplay = decodeValue(r.payload).display;
+      } catch { /* leave afterDisplay as null — shown as "(unchanged / declined)" */ }
+    }
+    writeLabLastResult = {
+      forComponent: entry.component,
+      forName: entry.name,
+      beforeDisplay,
+      payloadHex: toHex(payload),
+      ok,
+      statusName,
+      afterDisplay,
+    };
     if (readBack) {
-      const idx = lastResults.findIndex((x) => x.component === 'DriveUnit' && x.name === exp.addrName);
+      const idx = lastResults.findIndex((x) => x.component === entry.component && x.name === entry.name);
       if (idx >= 0) { lastResults[idx].status = 'ok'; lastResults[idx].typed = readBack; lastResults[idx].decoded = readBack; }
     }
     renderDashboard();
   }
 
-  // Diagnostic sweep requested after real hardware showed writing LAST_USED got a SUCCESS ack
-  // that didn't stick: is that gate (OEM configurable=false) blocking every possible value
-  // equally, or does it only affect some? Writes each non-zero START_ASSIST_MODE_CONFIGURATION
-  // enum value in turn, re-reading immediately after each, so one connected session settles it
-  // instead of clicking the single-value button repeatedly.
-  let startModeTryAllResults = null; // null | 'running' | [{ordinal, name, label, ok, statusName, stuck}]
-
-  async function attemptTryAllStartModeValues() {
-    const addr = addrOf('DriveUnit', 'START_ASSIST_MODE_CONFIGURATION');
-    if (!addr || !transport) {
-      await appAlert('Not connected to the bike anymore — reconnect (Read again) and try again.');
-      return;
+  function renderWriteLab() {
+    renderWriteLabComponentFilter();
+    els.writeLabAddressList.innerHTML = '';
+    for (const a of writeLabAddresses()) {
+      const opt = document.createElement('option');
+      opt.value = writeLabOptionText(a);
+      els.writeLabAddressList.appendChild(opt);
     }
-    const enumTable = FIELD_TYPES[6180].enumTable;
-    const ordinals = Object.keys(enumTable).map(Number).filter((n) => n !== 0).sort((a, b) => a - b);
-    startModeTryAllResults = 'running';
-    renderWriteExperiments();
-    const results = [];
-    for (const ordinal of ordinals) {
-      const entry = enumTable[ordinal];
-      const payload = encodeEnumArg(ordinal);
-      const { ok, statusName, readBack } = await writeAndReadBack(addr, payload, `write-startMode-tryAll-${entry.name}`);
-      const stuck = !!(readBack && readBack.value === entry.name);
-      results.push({ ordinal, name: entry.name, label: entry.label, ok, statusName, stuck });
-      if (readBack) {
-        const idx = lastResults.findIndex((x) => x.component === 'DriveUnit' && x.name === 'START_ASSIST_MODE_CONFIGURATION');
-        if (idx >= 0) { lastResults[idx].status = 'ok'; lastResults[idx].typed = readBack; lastResults[idx].decoded = readBack; }
+
+    els.writeLabDetail.innerHTML = '';
+    const entry = findWriteLabEntry(els.writeLabSearch.value);
+    if (!entry) return;
+
+    const addr = entry.address;
+
+    const beforeRow = document.createElement('div');
+    beforeRow.className = 'write-lab-row';
+    beforeRow.innerHTML = `<span>Current value</span><span></span>`;
+    beforeRow.lastElementChild.textContent = displayOf(entry.component, entry.name, '(not read yet)');
+    els.writeLabDetail.appendChild(beforeRow);
+
+    const kindRow = document.createElement('div');
+    kindRow.className = 'write-lab-row';
+    kindRow.innerHTML = `<span>Kind (registry)</span><span></span>`;
+    kindRow.lastElementChild.textContent = entry.kind + (entry.writable ? '' : ' — registry says not writable');
+    els.writeLabDetail.appendChild(kindRow);
+
+    const { el: inputEl, getPayload } = buildWriteLabInput(entry);
+    els.writeLabDetail.appendChild(inputEl);
+
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'histogram-reset-btn';
+    if (writeLabState === 'pending') { btn.textContent = 'Sending…'; btn.disabled = true; }
+    else if (!sweepFullyLoaded) { btn.textContent = 'Loading…'; btn.disabled = true; }
+    else { btn.textContent = 'Write'; }
+    btn.addEventListener('click', async () => {
+      const payload = getPayload();
+      if (payload === null) {
+        await appAlert('Could not parse that value into bytes — check the input.');
+        return;
       }
-      startModeTryAllResults = results.slice(); // progressive update — render after each value, not just at the end
-      renderWriteExperiments();
-    }
-    const dlog = window.Bes3DebugLog;
-    if (dlog) dlog.log('write-startMode-tryAll', 'summary', JSON.stringify(results));
-    startModeTryAllResults = results;
-    renderDashboard();
-  }
-
-  function renderWriteExperiments() {
-    els.writeExperiments.innerHTML = '';
-    for (const exp of WRITE_EXPERIMENTS) {
-      if (addrOf('DriveUnit', exp.addrName) === undefined) continue;
-      const current = valueOf('DriveUnit', exp.addrName);
-      if (current == null) continue; // not read yet / declined — nothing to show or act on
-
-      const row = document.createElement('div');
-      row.className = 'write-experiment-row' + (exp.isRealWrite ? ' write-experiment-real' : '');
-
-      const label = document.createElement('span');
-      label.className = 'write-experiment-label';
-      label.textContent = exp.label;
-
-      const result = findResult('DriveUnit', exp.addrName);
-      const typed = result && result.status === 'ok' ? result.typed : null;
-      const value = document.createElement('span');
-      value.className = 'write-experiment-value';
-      value.textContent = exp.formatValue ? exp.formatValue(typed) : displayOf('DriveUnit', exp.addrName);
-
-      const state = experimentState[exp.id];
-      const gated = exp.gate ? exp.gate() : null;
-
-      if (exp.isRealWrite && current === 'START_ASSIST_MODE_LAST_USED' && state !== 'failed') {
-        // Already set — show the value, no action needed.
-        const done = document.createElement('span');
-        done.className = 'write-experiment-value good';
-        done.textContent = 'already set';
-        row.append(label, value, done);
-        els.writeExperiments.appendChild(row);
-        if (exp.id === 'startMode') renderStartModeTryAllBlock();
-        continue;
-      }
-
-      const btn = document.createElement('button');
-      btn.type = 'button';
-      btn.className = exp.isRealWrite ? 'histogram-reset-btn' : 'histogram-change-btn secondary';
-      if (state === 'pending') { btn.textContent = 'Sending…'; btn.disabled = true; }
-      else if (!sweepFullyLoaded) { btn.textContent = 'Loading…'; btn.disabled = true; }
-      else if (exp.isRealWrite && gated === false) { btn.textContent = state === 'failed' ? 'Denied — retry anyway?' : 'Attempt anyway (locked)'; }
-      else if (state === 'done') { btn.textContent = exp.isRealWrite ? 'Set ✓' : 'Sent — see value/log'; }
-      else if (state === 'failed') { btn.textContent = 'No response — retry?'; }
-      else { btn.textContent = exp.isRealWrite ? 'Set to last-used' : 'Send probe'; }
-      btn.addEventListener('click', async () => {
-        if (await appConfirm(exp.confirmText(gated))) attemptWriteExperiment(exp.id);
-      });
-
-      row.append(label, value, btn);
-      els.writeExperiments.appendChild(row);
-      if (exp.id === 'startMode') renderStartModeTryAllBlock();
-    }
-    renderRpcExperiments();
-  }
-
-  // ASSIST_MODE_UP/ASSIST_MODE_DOWN are CallableDataPoint<Boolean, Unit> per Flow's own type
-  // declarations (confirmed via decompile) — the LED remote's own up/down mechanism, an RPC call,
-  // not a plain write. Already tested over BLE from a non-Flow client (companion bosch-assist-poc
-  // React Native PoC): both consistently DENIED, same as the direct ASSIST_MODE write above. This
-  // tests whether USB (a different transport, different firmware host address) gets the same
-  // result — appended to the same WRITE_EXPERIMENTS div since rpcCallWithArg (not writeAndReadBack)
-  // is the right primitive for an RPC, not a WRITE.
-  const RPC_EXPERIMENTS = [
-    { id: 'assistModeUp', addrName: 'ASSIST_MODE_UP', label: 'Assist mode up (6154, RPC)' },
-    { id: 'assistModeDown', addrName: 'ASSIST_MODE_DOWN', label: 'Assist mode down (6155, RPC)' },
-  ];
-  const rpcExperimentState = {}; // id -> null | 'pending' | 'done' | 'failed'
-  const rpcExperimentResult = {}; // id -> last statusName ('SUCCESS' / 'DENIED' / 'timeout' / etc.)
-
-  async function attemptRpcExperiment(id) {
-    const exp = RPC_EXPERIMENTS.find((e) => e.id === id);
-    const addr = addrOf('DriveUnit', exp.addrName);
-    if (!addr || !transport) {
-      await appAlert('Not connected to the bike anymore — reconnect (Read again) and try again.');
-      return;
-    }
-    rpcExperimentState[id] = 'pending';
-    renderWriteExperiments();
-    const result = await rpcCallWithArg(addr, encodeBoolArg(true), () => true, `usb-test-${id}`);
-    let statusName;
-    let ok;
-    if (result === null) { statusName = 'timeout'; ok = false; }
-    else if (result && result.declined) { statusName = result.statusName; ok = false; }
-    else { statusName = 'SUCCESS'; ok = true; }
-    rpcExperimentResult[id] = statusName;
-    rpcExperimentState[id] = ok ? 'done' : 'failed';
-    renderDashboard();
-  }
-
-  function renderRpcExperiments() {
-    for (const exp of RPC_EXPERIMENTS) {
-      if (addrOf('DriveUnit', exp.addrName) === undefined) continue;
-
-      const row = document.createElement('div');
-      row.className = 'write-experiment-row write-experiment-real';
-
-      const label = document.createElement('span');
-      label.className = 'write-experiment-label';
-      label.textContent = exp.label;
-
-      const value = document.createElement('span');
-      value.className = 'write-experiment-value';
-      value.textContent = rpcExperimentResult[exp.id] || '—';
-
-      const state = rpcExperimentState[exp.id];
-      const btn = document.createElement('button');
-      btn.type = 'button';
-      btn.className = 'histogram-reset-btn';
-      if (state === 'pending') { btn.textContent = 'Sending…'; btn.disabled = true; }
-      else if (!sweepFullyLoaded) { btn.textContent = 'Loading…'; btn.disabled = true; }
-      else if (state === 'done') { btn.textContent = 'Sent ✓'; }
-      else if (state === 'failed') { btn.textContent = 'Denied/failed — retry?'; }
-      else { btn.textContent = 'Trigger (RPC)'; }
-      btn.addEventListener('click', async () => {
-        const addr = addrOf('DriveUnit', exp.addrName);
-        if (await appConfirm(
-          `Call ${exp.addrName} (addr ${addr}) as an RPC, over USB?\n\n` +
-          'This is the LED remote\'s own up/down mechanism (CallableDataPoint<Boolean, Unit>), not ' +
-          'a plain write. Already tested over BLE from a non-Flow client: consistently DENIED. ' +
-          'This tests whether USB gets the same result. If it actually changes the bike\'s live ' +
-          'assist mode, watch the display/remote — the result is only logged, not assumed.'
-        )) attemptRpcExperiment(exp.id);
-      });
-
-      row.append(label, value, btn);
-      els.writeExperiments.appendChild(row);
-    }
-  }
-
-  // Shared by both branches above (the "already set" early-exit and the normal button path) —
-  // the try-all-values diagnostic is useful regardless of whether last-used happens to be set.
-  function renderStartModeTryAllBlock() {
-    const tryAllRow = document.createElement('div');
-    tryAllRow.className = 'write-experiment-tryall-row';
-    const tryAllBtn = document.createElement('button');
-    tryAllBtn.type = 'button';
-    tryAllBtn.className = 'histogram-change-btn secondary';
-    if (startModeTryAllResults === 'running') { tryAllBtn.textContent = 'Testing…'; tryAllBtn.disabled = true; }
-    else if (!sweepFullyLoaded) { tryAllBtn.textContent = 'Loading…'; tryAllBtn.disabled = true; }
-    else { tryAllBtn.textContent = 'Try all values'; }
-    tryAllBtn.addEventListener('click', async () => {
-      if (await appConfirm(
-        'Write EVERY possible Start mode (6180) value in turn, re-reading after each?\n\n' +
-        'Sends up to 6 separate WRITE frames back-to-back (last-used, plus positions 0-4), ' +
-        'each immediately followed by a re-read to check whether it actually stuck. Purely ' +
-        'diagnostic — finds out whether the "locked by manufacturer" gate blocks every value ' +
-        'equally or only some. Every result is logged, not assumed.'
-      )) attemptTryAllStartModeValues();
+      const confirmed = await appConfirm(
+        `Write to ${entry.component}.${entry.name} (addr ${addr}, 0x${addr.toString(16)})?\n\n` +
+        `Bytes to send: ${toHex(payload) || '(empty)'}\n\n` +
+        'This is a highly experimental, generic raw write — it goes straight to the protocol ' +
+        'level with no per-field validation beyond basic type encoding. It may be silently ' +
+        'ignored, explicitly denied, or in rare cases could leave the bike in an unexpected ' +
+        'state. Only proceed if you understand what this field does and accept that risk.'
+      );
+      if (confirmed) attemptWriteLab(entry, payload);
     });
-    tryAllRow.appendChild(tryAllBtn);
-    if (Array.isArray(startModeTryAllResults)) {
-      const results = document.createElement('div');
-      results.className = 'write-experiment-tryall-results';
-      for (const r of startModeTryAllResults) {
-        const item = document.createElement('span');
-        item.className = 'write-experiment-tryall-item' + (r.stuck ? ' good' : r.ok ? '' : ' bad');
-        item.textContent = `${r.label}: ${r.ok ? (r.stuck ? 'stuck' : 'ack, no change') : (r.statusName || 'no response')}`;
-        results.appendChild(item);
+    els.writeLabDetail.appendChild(btn);
+
+    const r = writeLabLastResult;
+    if (r && r.forComponent === entry.component && r.forName === entry.name) {
+      const result = document.createElement('div');
+      result.className = 'write-lab-result';
+      const rows = [
+        ['Before', r.beforeDisplay],
+        ['Sent (hex)', r.payloadHex || '(empty)'],
+        ['Response', r.statusName || (r.ok ? 'SUCCESS' : 'no response')],
+        ['After (re-read)', r.afterDisplay ?? '(unchanged / declined)'],
+      ];
+      for (const [k, v] of rows) {
+        const row = document.createElement('div');
+        row.className = 'write-lab-row';
+        const kEl = document.createElement('span');
+        kEl.textContent = k;
+        const vEl = document.createElement('span');
+        vEl.textContent = v;
+        if (k === 'Response') vEl.className = r.ok ? 'good' : 'bad';
+        row.append(kEl, vEl);
+        result.appendChild(row);
       }
-      tryAllRow.appendChild(results);
+      els.writeLabDetail.appendChild(result);
     }
-    els.writeExperiments.appendChild(tryAllRow);
+  }
+  if (els.writeLabSearch) {
+    els.writeLabSearch.addEventListener('input', renderWriteLab);
   }
 
   function renderDashboard() {
@@ -1625,7 +1553,7 @@
     else if (dra === false) draVal.className = 'good';
     els.drivetrainGrid.appendChild(draRow);
     els.drivetrainGrid.appendChild(draVal);
-    renderWriteExperiments();
+    renderWriteLab();
 
     els.usageGrid.innerHTML = '';
     const odometerM = valueOf('DriveUnit', 'ODOMETER');
@@ -2134,8 +2062,7 @@
       // assist-mode histogram simply stays empty for a loaded file, same as it would for any
       // bike where that RPC sweep hasn't run yet.
       assistModeStats = [];
-      for (const key of Object.keys(experimentState)) delete experimentState[key];
-      startModeTryAllResults = null;
+      writeLabLastResult = null;
       transport = null;
       method = 'usb';
       phase = 'connected';
@@ -2171,8 +2098,7 @@
     disconnectedAfterRead = false;
     loadedFromFile = false;
     assistModeStats = [];
-    for (const key of Object.keys(experimentState)) delete experimentState[key];
-    startModeTryAllResults = null;
+    writeLabLastResult = null;
     let device;
     try {
       device = transportKind === 'ble-mcsp'
