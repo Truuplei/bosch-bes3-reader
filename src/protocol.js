@@ -639,12 +639,17 @@ function encodeExecuteInformationManagerCommandArg(command, entryNumber) {
 }
 
 function _readVarintAt(payload, i) {
+  // Accumulate via addition/multiplication, not `<<`/`|=` — those coerce to signed
+  // 32-bit in JS, which silently corrupts any value >= 2^31 (e.g. real Unix
+  // timestamps) into a negative number. Confirmed on real hardware: a RemoteControl
+  // issue timestamp of 3,572,967,206 was coming out as a large negative, rendering
+  // as a bogus 1947 date.
   let result = 0;
   let shift = 0;
   for (;;) {
     const b = payload[i];
     i += 1;
-    result |= (b & 0x7f) << shift;
+    result += (b & 0x7f) * Math.pow(2, shift);
     if ((b & 0x80) === 0) break;
     shift += 7;
   }
@@ -654,6 +659,14 @@ function _readVarintAt(payload, i) {
 function _readLenDelimitedAt(payload, i) {
   const { value: len, next } = _readVarintAt(payload, i);
   return { content: payload.slice(next, next + len), next: next + len };
+}
+
+// Un-zigzags a protobuf sint32/sint64 value read as a plain varint.
+// Confirmed from DiagnosticTool 3's own generated code: Timestamp.value uses
+// input.readSInt64() (zigzag), not a plain varint — decoding it as plain came out
+// almost exactly double the real value (raw 3,572,967,206 vs real ~1,786,483,603).
+function _zigzagDecode(n) {
+  return n % 2 === 0 ? n / 2 : -(n + 1) / 2;
 }
 
 // Decodes ExecuteInformationManagerCommandReturn — the RPC response to
@@ -700,9 +713,9 @@ function decodeExecuteInformationManagerCommandReturn(payload) {
             const rr = _readLenDelimitedAt(df, j);
             j = rr.next;
             if (fn2 === 2) {
-              // Timestamp{value: int64, field 1}
+              // Timestamp{value: sint64 (zigzag), field 1}
               const ts = rr.content;
-              if (ts.length >= 1 && (ts[0] >>> 3) === 1) out.timestamp = _readVarintAt(ts, 1).value;
+              if (ts.length >= 1 && (ts[0] >>> 3) === 1) out.timestamp = _zigzagDecode(_readVarintAt(ts, 1).value);
             }
           } else break;
         }
