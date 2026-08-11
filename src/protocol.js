@@ -664,7 +664,11 @@ function _readLenDelimitedAt(payload, i) {
 // (echo of the request; field 2 = issueId{value: uint32 @ field 1}), field 3 =
 // returnValue (enum), field 4 = entryCount (uint32).
 function decodeExecuteInformationManagerCommandReturn(payload) {
-  const out = { returnValue: null, entryCount: null, issueId: null, timestamp: null, activationCount: null };
+  // returnValue/entryCount default to their real proto3 zero-values (SUCCESS, 0 issues) — confirmed
+  // on real hardware that the bike omits both fields entirely from the wire when they're 0, same
+  // default-omission convention as every other decoder in this file. issueId/timestamp/
+  // activationCount stay null-checked — they only appear inside a genuine per-issue entry.
+  const out = { returnValue: 0, entryCount: 0, issueId: null, timestamp: null, activationCount: null };
   let i = 0;
   while (i < payload.length) {
     const tag = payload[i];
