@@ -174,6 +174,22 @@
   .write-lab-input input[type="text"], .write-lab-input input[type="number"], .write-lab-input select { width: 100%; box-sizing: border-box; font: 400 12px 'IBM Plex Mono', monospace; background: var(--bg); color: var(--text); border: 1px solid var(--border2); border-radius: 5px; padding: 5px 7px; }
   .write-lab-hex-input { font-family: 'IBM Plex Mono', monospace; }
   .write-lab-result { margin-top: 8px; padding-top: 8px; border-top: 1px solid var(--border); }
+  .diagnostics-catalog-status { font: 400 10.5px 'IBM Plex Mono', monospace; color: var(--faint); margin: 0; }
+  .diagnostics-component-group { margin-top: 10px; padding-top: 8px; border-top: 1px solid var(--border); }
+  .diagnostics-component-name { display: block; font: 600 10px 'IBM Plex Mono', monospace; color: var(--muted); letter-spacing: 0.03em; margin-bottom: 4px; }
+  .diagnostics-empty { font: 400 11px 'IBM Plex Mono', monospace; color: var(--faint); }
+  .diagnostics-issue { padding: 5px 0; border-bottom: 1px dashed var(--border); }
+  .diagnostics-issue:last-child { border-bottom: none; }
+  .diagnostics-issue-head { display: flex; align-items: center; gap: 8px; cursor: pointer; }
+  .diagnostics-severity { font: 600 9px 'IBM Plex Sans', sans-serif; letter-spacing: 0.03em; padding: 1px 6px; border-radius: 8px; white-space: nowrap; }
+  .diagnostics-severity.sev-info { color: var(--faint); border: 1px solid var(--border2); }
+  .diagnostics-severity.sev-warning { color: var(--accent); border: 1px solid var(--accent); }
+  .diagnostics-severity.sev-error { color: var(--bad); border: 1px solid var(--bad); }
+  .diagnostics-severity.sev-critical { color: #fff; background: var(--bad); border: 1px solid var(--bad); }
+  .diagnostics-issue-title { font: 500 12px 'IBM Plex Sans', sans-serif; flex: 1; }
+  .diagnostics-issue-meta { font: 400 10.5px 'IBM Plex Mono', monospace; color: var(--faint); white-space: nowrap; }
+  .diagnostics-issue-detail { font: 400 11px 'IBM Plex Mono', monospace; color: var(--faint); margin: 6px 0 0 0; line-height: 1.5; white-space: normal; }
+  .diagnostics-issue-detail p { margin: 0 0 6px 0; }
   .histogram-reset-btn { font: 500 10.5px 'IBM Plex Sans', sans-serif; color: var(--accent); background: none; border: 1px solid var(--border2); border-radius: 5px; padding: 2px 8px; cursor: pointer; white-space: nowrap; }
   .histogram-reset-btn:disabled { color: var(--faint); cursor: default; opacity: 0.7; }
   .histogram-label-clickable { cursor: pointer; text-decoration: underline dotted; text-underline-offset: 2px; }
@@ -411,6 +427,12 @@
             <datalist id="writeLabAddressList"></datalist>
           </div>
           <div id="writeLabDetail"></div>
+        </div>
+        <div class="card data-card diagnostics-card">
+          <span class="card-label">DIAGNOSTICS / ACTIVE ISSUES</span>
+          <p class="diagnostics-catalog-status" id="diagnosticsCatalogStatus"></p>
+          <button type="button" class="histogram-reset-btn" id="diagnosticsScanBtn">Scan for active issues</button>
+          <div id="diagnosticsResults"></div>
         </div>
         <div class="card data-card">
           <span class="card-label">USAGE</span>
