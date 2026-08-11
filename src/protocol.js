@@ -608,6 +608,127 @@ function encodeUdamParams(params) {
   return bytes;
 }
 
+// DiagnosticCommandEnum (com.bosch.ebike.bes3.messagebus.DiagnosticCommandEnumType) —
+// confirmed field numbers/values from DiagnosticTool 3's own generated protobuf class.
+// Only the read-only ones are ever used by this tool.
+const DiagnosticCommand = {
+  GET_ISSUE_COUNT: 4,
+  READ_ISSUE_BY_NUMBER: 5,
+};
+
+// DiagnosticReturnValueEnum — same source. DOES_NOT_EXIST is the real "end of list"
+// signal for a READ_ISSUE_BY_NUMBER loop, not a timeout/DENIED.
+const DIAGNOSTIC_RETURN_VALUES = {
+  0: 'SUCCESS', 1: 'DOES_NOT_EXIST', 2: 'UNKNOWN_ISSUE', 3: 'FAILURE',
+  4: 'INVALID_ISSUE_COUNT', 5: 'NO_ACCESS', 6: 'UNKNOWN_COMMAND',
+};
+function diagnosticReturnValueName(n) {
+  return DIAGNOSTIC_RETURN_VALUES[n] || `UNKNOWN(${n})`;
+}
+
+// Encodes ExecuteInformationManagerCommandParameters — the RPC argument for
+// EXECUTE_INFORMATION_MANAGER_COMMAND_BOSCH (field 1 = command enum, field 3 =
+// entryNumber uint32; field 2 = issueId submessage omitted — only needed for
+// READ_ISSUE_BY_KEY/DELETE_ISSUE, neither of which this tool ever sends).
+// Field numbers confirmed from DiagnosticTool 3's own generated protobuf class
+// (com.bosch.ebike.bes3.messagebus.ExecuteInformationManagerCommandParameters).
+function encodeExecuteInformationManagerCommandArg(command, entryNumber) {
+  const bytes = [0x08, command];
+  if (entryNumber) bytes.push(0x18, ...encodeVarint(entryNumber));
+  return bytes;
+}
+
+function _readVarintAt(payload, i) {
+  let result = 0;
+  let shift = 0;
+  for (;;) {
+    const b = payload[i];
+    i += 1;
+    result |= (b & 0x7f) << shift;
+    if ((b & 0x80) === 0) break;
+    shift += 7;
+  }
+  return { value: result, next: i };
+}
+
+function _readLenDelimitedAt(payload, i) {
+  const { value: len, next } = _readVarintAt(payload, i);
+  return { content: payload.slice(next, next + len), next: next + len };
+}
+
+// Decodes ExecuteInformationManagerCommandReturn — the RPC response to
+// EXECUTE_INFORMATION_MANAGER_COMMAND_BOSCH (GET_ISSUE_COUNT/READ_ISSUE_BY_NUMBER).
+// Field numbers confirmed from DiagnosticTool 3's own generated protobuf class:
+// field 1 = dataFrame (IssueDataFrame: field 2 = timestamp{value: int64 @ field 1},
+// field 3 = activationCount uint32), field 2 = executeInformationManagerCommandParameters
+// (echo of the request; field 2 = issueId{value: uint32 @ field 1}), field 3 =
+// returnValue (enum), field 4 = entryCount (uint32).
+function decodeExecuteInformationManagerCommandReturn(payload) {
+  const out = { returnValue: null, entryCount: null, issueId: null, timestamp: null, activationCount: null };
+  let i = 0;
+  while (i < payload.length) {
+    const tag = payload[i];
+    const fieldNum = tag >>> 3;
+    const wireType = tag & 0x7;
+    i += 1;
+    if (wireType === 0) {
+      const r = _readVarintAt(payload, i);
+      i = r.next;
+      if (fieldNum === 3) out.returnValue = r.value;
+      else if (fieldNum === 4) out.entryCount = r.value;
+    } else if (wireType === 2) {
+      const r = _readLenDelimitedAt(payload, i);
+      i = r.next;
+      if (fieldNum === 1) {
+        // IssueDataFrame
+        const df = r.content;
+        let j = 0;
+        while (j < df.length) {
+          const t2 = df[j];
+          const fn2 = t2 >>> 3;
+          const wt2 = t2 & 0x7;
+          j += 1;
+          if (wt2 === 0) {
+            const rr = _readVarintAt(df, j);
+            j = rr.next;
+            if (fn2 === 3) out.activationCount = rr.value;
+          } else if (wt2 === 2) {
+            const rr = _readLenDelimitedAt(df, j);
+            j = rr.next;
+            if (fn2 === 2) {
+              // Timestamp{value: int64, field 1}
+              const ts = rr.content;
+              if (ts.length >= 1 && (ts[0] >>> 3) === 1) out.timestamp = _readVarintAt(ts, 1).value;
+            }
+          } else break;
+        }
+      } else if (fieldNum === 2) {
+        // ExecuteInformationManagerCommandParameters (echo of the request)
+        const params = r.content;
+        let j = 0;
+        while (j < params.length) {
+          const t2 = params[j];
+          const fn2 = t2 >>> 3;
+          const wt2 = t2 & 0x7;
+          j += 1;
+          if (wt2 === 0) {
+            j = _readVarintAt(params, j).next;
+          } else if (wt2 === 2) {
+            const rr = _readLenDelimitedAt(params, j);
+            j = rr.next;
+            if (fn2 === 2) {
+              // IssueId{value: uint32, field 1}
+              const iid = rr.content;
+              if (iid.length >= 1 && (iid[0] >>> 3) === 1) out.issueId = _readVarintAt(iid, 1).value;
+            }
+          } else break;
+        }
+      }
+    } else break;
+  }
+  return out;
+}
+
 // Encodes the two-field argument of SET_UDAM_VALUES_PARAMETERS: field 1 =
 // ConfigId (nested submessage), field 2 = UdamParams (nested submessage).
 // Confirmed field numbering from decompile of the shared message-bus RPC
@@ -647,6 +768,10 @@ const protocolExports = {
   decodeUdamLimits,
   encodeUdamParams,
   encodeSetUdamValuesParametersArg,
+  DiagnosticCommand,
+  diagnosticReturnValueName,
+  encodeExecuteInformationManagerCommandArg,
+  decodeExecuteInformationManagerCommandReturn,
   parseReadResponseFrame,
   statusCodeName,
   decodeValue,

@@ -1,2 +1,8 @@
 node_modules/
 *.log
+
+# User-supplied issue-code catalog (extracted from the user's own Flow APK —
+# see docs/diagnostics.md). Bosch's own copyrighted text; never committed or
+# distributed from this repo. The app works fine without it (falls back to
+# raw numeric issue IDs).
+web/data/issues/

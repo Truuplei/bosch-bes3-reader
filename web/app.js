@@ -4,7 +4,7 @@
   // actually pick up the new build?" question can be answered by looking,
   // not assumed — browser/CDN caching can otherwise make a hard refresh
   // silently keep serving a stale bundle.
-  const APP_VERSION = '2026-08-10.17-write-lab-rpc-mode';
+  const APP_VERSION = '2026-08-11.18-diagnostics-active-issues';
 
   // Bump whenever the exported-report JSON schema changes (new/renamed fields the loader
   // depends on). Lets loadReportFile() below tell an old export apart from the current shape
@@ -28,6 +28,8 @@
     buildSubscribeRequestFrame, buildUnsubscribeRequestFrame, parseNotifyMessage,
     encodeConfigIdArg, decodeAssistModeStatistics, decodeConfigIdList, decodeStringList,
     decodeUdamParams, decodeBoolResponse, decodeUdamLimits, encodeSetUdamValuesParametersArg,
+    DiagnosticCommand, diagnosticReturnValueName, encodeExecuteInformationManagerCommandArg,
+    decodeExecuteInformationManagerCommandReturn,
     parseReadResponseFrame, decodeValue, toHex,
   } = window.Bes3Protocol;
   const { decodeTyped, FIELD_TYPES, reformatDisplayFromRaw } = window.Bes3MessageTypes;
@@ -108,6 +110,9 @@
     writeLabSearch: $('writeLabSearch'),
     writeLabAddressList: $('writeLabAddressList'),
     writeLabDetail: $('writeLabDetail'),
+    diagnosticsCatalogStatus: $('diagnosticsCatalogStatus'),
+    diagnosticsScanBtn: $('diagnosticsScanBtn'),
+    diagnosticsResults: $('diagnosticsResults'),
     assistModeModalBackdrop: $('assistModeModalBackdrop'),
     assistModeModalTitle: $('assistModeModalTitle'),
     assistModeModalBody: $('assistModeModalBody'),
@@ -1570,6 +1575,217 @@
     els.writeLabSearch.addEventListener('input', renderWriteLab);
   }
 
+  // ---------- Diagnostics: active issues via EXECUTE_INFORMATION_MANAGER_COMMAND_BOSCH ----------
+  // Confirmed via decompile that this is a real, non-dealer-gated diagnostic RPC — Flow's own
+  // consumer code (DefaultReadActiveIssues) uses exactly this "Bosch" access tier (of five:
+  // Bosch/Ibd/Oem/Rider/Sp) to read active issues per component. Read-only: only GET_ISSUE_COUNT
+  // and READ_ISSUE_BY_NUMBER are ever sent, never DELETE_ISSUE/DELETE_ALL_ISSUES/GET_ISSUE_STATE
+  // even though the protocol supports them.
+  const DIAGNOSTICS_COMPONENTS = [
+    ['DriveUnit', 'Drive Unit'],
+    ['Battery', 'Battery'],
+    ['Battery2', 'Battery 2'],
+    ['ConnectModule', 'Connect Module'],
+    ['AntiLockBrakeSystem', 'ABS'],
+    ['HeadUnit', 'Head Unit'],
+    ['RemoteControl', 'Remote'],
+  ];
+
+  // Priority order: DiagnosticTool 3's dealer-tier catalogs (IBD/OEM/SP) are richer than Flow's
+  // consumer-facing Rider catalog, so try those first if present. None of these files are ever
+  // bundled or committed by this project — each user supplies their own, extracted from an app
+  // they legitimately have access to (see docs/diagnostics.md and the web/data/issues/ gitignore
+  // entry). The tool works fine with none present — falls back to raw numeric issue IDs.
+  const ISSUE_CATALOG_FILES = [
+    { tier: 'IBD', file: 'data/issues/issues_en_IBD.json' },
+    { tier: 'OEM', file: 'data/issues/issues_en_OEM.json' },
+    { tier: 'SP', file: 'data/issues/issues_en_SP.json' },
+    { tier: 'Rider', file: 'data/issues/issues_en_Rider.json' },
+  ];
+
+  let diagnosticsCatalog = null; // null (not checked yet) | false (none found) | {tier, file, issues, count}
+  let diagnosticsState = null; // null | 'scanning' | 'done'
+  let diagnosticsResultsByComponent = {}; // component -> {status, statusName?, issues: [{issueId, timestamp, activationCount}]}
+  const diagnosticsExpanded = new Set(); // `${component}:${issueId}` keys currently expanded
+
+  async function loadIssueCatalogOnce() {
+    if (diagnosticsCatalog !== null) return diagnosticsCatalog;
+    for (const { tier, file } of ISSUE_CATALOG_FILES) {
+      try {
+        const res = await fetch(file);
+        if (!res.ok) continue;
+        const data = await res.json();
+        if (data && data.issues) {
+          diagnosticsCatalog = { tier, file, issues: data.issues, count: Object.keys(data.issues).length };
+          return diagnosticsCatalog;
+        }
+      } catch { /* file not present / not valid JSON locally — try the next tier */ }
+    }
+    diagnosticsCatalog = false;
+    return diagnosticsCatalog;
+  }
+
+  function lookupIssue(issueId) {
+    if (!diagnosticsCatalog) return null;
+    return diagnosticsCatalog.issues[issueId.toString(16).toUpperCase()] || null;
+  }
+
+  async function attemptDiagnosticsScan() {
+    if (!transport) {
+      await appAlert('Not connected to the bike anymore — reconnect (Read again) and try again.');
+      return;
+    }
+    diagnosticsState = 'scanning';
+    diagnosticsResultsByComponent = {};
+    renderDiagnostics();
+    await loadIssueCatalogOnce();
+    for (const [component] of DIAGNOSTICS_COMPONENTS) {
+      const addr = addrOf(component, 'EXECUTE_INFORMATION_MANAGER_COMMAND_BOSCH');
+      if (!addr) {
+        diagnosticsResultsByComponent[component] = { status: 'unavailable', issues: [] };
+        renderDiagnostics();
+        continue;
+      }
+      const countArg = encodeExecuteInformationManagerCommandArg(DiagnosticCommand.GET_ISSUE_COUNT, 0);
+      const countResult = await rpcCallWithArg(
+        addr, countArg, decodeExecuteInformationManagerCommandReturn, `diagnostics-count-${component}`
+      );
+      if (!countResult || countResult.declined || countResult.returnValue !== 0) {
+        diagnosticsResultsByComponent[component] = {
+          status: !countResult ? 'timeout' : 'declined',
+          statusName: countResult
+            ? (countResult.declined ? countResult.statusName : diagnosticReturnValueName(countResult.returnValue))
+            : null,
+          issues: [],
+        };
+        renderDiagnostics();
+        continue;
+      }
+      const entryCount = countResult.entryCount || 0;
+      const issues = [];
+      diagnosticsResultsByComponent[component] = { status: 'ok', issues };
+      renderDiagnostics();
+      for (let n = 0; n < entryCount; n++) {
+        const arg = encodeExecuteInformationManagerCommandArg(DiagnosticCommand.READ_ISSUE_BY_NUMBER, n);
+        const result = await rpcCallWithArg(
+          addr, arg, decodeExecuteInformationManagerCommandReturn, `diagnostics-read-${component}-${n}`
+        );
+        if (!result || result.declined || result.returnValue === 1 /* DOES_NOT_EXIST */) break;
+        if (result.returnValue === 0 /* SUCCESS */ && result.issueId != null) {
+          issues.push({ issueId: result.issueId, timestamp: result.timestamp, activationCount: result.activationCount });
+        }
+        renderDiagnostics();
+      }
+    }
+    diagnosticsState = 'done';
+    renderDiagnostics();
+  }
+
+  function formatDiagnosticsTimestamp(ts) {
+    if (!ts) return '—';
+    try { return new Date(ts * 1000).toLocaleString(); } catch { return String(ts); }
+  }
+
+  function renderDiagnostics() {
+    if (diagnosticsCatalog === null) {
+      els.diagnosticsCatalogStatus.textContent = 'Local issue-code catalog: checking…';
+    } else if (diagnosticsCatalog === false) {
+      els.diagnosticsCatalogStatus.textContent =
+        'No local issue-code catalog found — showing raw codes only. See docs/diagnostics.md to add your own.';
+    } else {
+      els.diagnosticsCatalogStatus.textContent =
+        `Using local catalog: issues_en_${diagnosticsCatalog.tier}.json (${diagnosticsCatalog.count.toLocaleString()} codes)`;
+    }
+
+    els.diagnosticsScanBtn.disabled = diagnosticsState === 'scanning' || !sweepFullyLoaded;
+    els.diagnosticsScanBtn.textContent = diagnosticsState === 'scanning' ? 'Scanning…' : 'Scan for active issues';
+
+    els.diagnosticsResults.innerHTML = '';
+    for (const [component, label] of DIAGNOSTICS_COMPONENTS) {
+      const result = diagnosticsResultsByComponent[component];
+      if (!result) continue; // not scanned this session yet
+
+      const group = document.createElement('div');
+      group.className = 'diagnostics-component-group';
+      const heading = document.createElement('span');
+      heading.className = 'diagnostics-component-name';
+      heading.textContent = label;
+      group.appendChild(heading);
+
+      if (result.status !== 'ok') {
+        const empty = document.createElement('div');
+        empty.className = 'diagnostics-empty';
+        empty.textContent = result.status === 'unavailable'
+          ? 'Not available on this component.'
+          : `Could not read issues (${result.statusName || 'no response'}).`;
+        group.appendChild(empty);
+      } else if (result.issues.length === 0) {
+        const empty = document.createElement('div');
+        empty.className = 'diagnostics-empty';
+        empty.textContent = 'No active issues.';
+        group.appendChild(empty);
+      } else {
+        for (const issue of result.issues) {
+          const catalogEntry = lookupIssue(issue.issueId);
+          const idHex = issue.issueId.toString(16).toUpperCase();
+          const key = `${component}:${issue.issueId}`;
+          const row = document.createElement('div');
+          row.className = 'diagnostics-issue';
+
+          const head = document.createElement('div');
+          head.className = 'diagnostics-issue-head';
+
+          const sevText = catalogEntry ? catalogEntry.severity : null;
+          const sev = document.createElement('span');
+          sev.className = 'diagnostics-severity ' + (
+            sevText === 'CRITICAL_ERROR' ? 'sev-critical'
+              : sevText === 'ERROR' ? 'sev-error'
+              : sevText === 'WARNING' ? 'sev-warning'
+              : 'sev-info'
+          );
+          sev.textContent = sevText || '—';
+
+          const title = document.createElement('span');
+          title.className = 'diagnostics-issue-title';
+          title.textContent = catalogEntry
+            ? (catalogEntry.AppRiderErrorTitle || catalogEntry.component_name || `Issue 0x${idHex}`)
+            : `Issue 0x${idHex}`;
+
+          const meta = document.createElement('span');
+          meta.className = 'diagnostics-issue-meta';
+          meta.textContent = `${formatDiagnosticsTimestamp(issue.timestamp)} · ×${issue.activationCount ?? '?'}`;
+
+          head.append(sev, title, meta);
+          row.appendChild(head);
+
+          if (catalogEntry && (catalogEntry.description || catalogEntry.measures)) {
+            const detail = document.createElement('div');
+            detail.className = 'diagnostics-issue-detail';
+            detail.style.display = diagnosticsExpanded.has(key) ? '' : 'none';
+            detail.innerHTML =
+              (catalogEntry.description ? `<p>${catalogEntry.description}</p>` : '') +
+              (catalogEntry.measures ? `<p>${catalogEntry.measures}</p>` : '');
+            row.appendChild(detail);
+            head.style.cursor = 'pointer';
+            head.addEventListener('click', () => {
+              if (diagnosticsExpanded.has(key)) diagnosticsExpanded.delete(key);
+              else diagnosticsExpanded.add(key);
+              renderDiagnostics();
+            });
+          }
+
+          group.appendChild(row);
+        }
+      }
+
+      els.diagnosticsResults.appendChild(group);
+    }
+  }
+  if (els.diagnosticsScanBtn) {
+    els.diagnosticsScanBtn.addEventListener('click', () => { attemptDiagnosticsScan(); });
+  }
+  loadIssueCatalogOnce().then(() => renderDiagnostics());
+
   function renderDashboard() {
     // PRODUCT_NAME here is really the drive unit's own product line (e.g. "Performance Line CX")
     // — identical text on any brand that happens to use the same motor, not the bike itself. Brand
@@ -1649,6 +1865,7 @@
     els.drivetrainGrid.appendChild(draRow);
     els.drivetrainGrid.appendChild(draVal);
     renderWriteLab();
+    renderDiagnostics();
 
     els.usageGrid.innerHTML = '';
     const odometerM = valueOf('DriveUnit', 'ODOMETER');
@@ -2158,6 +2375,8 @@
       // bike where that RPC sweep hasn't run yet.
       assistModeStats = [];
       writeLabLastResult = null;
+      diagnosticsResultsByComponent = {};
+      diagnosticsState = null;
       transport = null;
       method = 'usb';
       phase = 'connected';
@@ -2194,6 +2413,8 @@
     loadedFromFile = false;
     assistModeStats = [];
     writeLabLastResult = null;
+    diagnosticsResultsByComponent = {};
+    diagnosticsState = null;
     let device;
     try {
       device = transportKind === 'ble-mcsp'
