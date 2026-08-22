@@ -2511,7 +2511,7 @@
 
       const cs = compStats[entry.component] || (compStats[entry.component] = { ok: 0, fails: 0 });
       if (!CORE_COMPONENTS.has(entry.component) && cs.ok === 0 && cs.fails >= 3) {
-        results.push({ ...entry, status: 'skipped', detail: 'component not detected', decoded: null, typed: null });
+        results.push({ ...entry, status: 'skipped', detail: 'component not detected (no route)', decoded: null, typed: null });
         done++;
         continue;
       }
@@ -2538,11 +2538,18 @@
         status = 'declined';
         detail = result.statusName;
       }
-      // A clean 'declined' is just as good a "not present" signal as a 'timeout' — a component
-      // that's genuinely absent (no ABS, no second battery, no display) answers every one of its
-      // addresses with a fast decline, and would otherwise never trip this skip since it never times out.
+      // What counts as an "absent component" signal, for the skip below. Only a timeout or a
+      // NO_ROUTE_FOUND decline means genuinely absent — there is no route to the endpoint. Every
+      // OTHER decline proves the component is PRESENT and answering: DENIED (exists, policy-gated),
+      // NOT_READY (present, busy), UNSUPPORTED (routed to the component, field not implemented).
+      // The previous version counted ALL declines as absence, so a present component whose first
+      // few addresses happen to be DENIED — e.g. a Kiox head unit, whose 0x0c11-0x0c13 are DENIED —
+      // was wrongly marked "not detected" and its readable fields (hardware/bootloader version,
+      // display brightness, feature flags) were never read. Verified on hardware: with this change
+      // the head unit's ~18 readable fields appear; without it, zero.
       if (status === 'ok') cs.ok++;
-      else if (status === 'timeout' || status === 'declined') cs.fails++;
+      else if (status === 'timeout' ||
+               (status === 'declined' && detail === 'NO_ROUTE_FOUND')) cs.fails++;
 
       let decoded = null;
       let typed = null;
